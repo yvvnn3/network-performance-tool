@@ -1,0 +1,160 @@
+#!/bin/bash
+#
+# netperf.sh - Outil de diagnostic et performance réseau
+# Auteur : Yvann Huido-Lobe
+# Description : script Bash qui centralise les infos réseau essentielles
+#               (interfaces, latence, perte de paquets, débit) pour un
+#               diagnostic rapide en environnement SISR.
+#
+# Usage : ./netperf.sh [-h hote] [-c nb_pings] [-i interface]
+#
+
+set -euo pipefail
+
+# ---------- Valeurs par défaut ----------
+HOTE="8.8.8.8"
+NB_PINGS=10
+INTERFACE=""
+
+# ---------- Couleurs pour la lisibilité ----------
+VERT="\033[0;32m"
+JAUNE="\033[1;33m"
+ROUGE="\033[0;31m"
+CYAN="\033[0;36m"
+RESET="\033[0m"
+
+# ---------- Lecture des arguments ----------
+usage() {
+    echo "Usage : $0 [-h hote] [-c nb_pings] [-i interface]"
+    echo "  -h  Hôte à tester (défaut: 8.8.8.8)"
+    echo "  -c  Nombre de pings à envoyer (défaut: 10)"
+    echo "  -i  Interface réseau à tester (défaut: interface par défaut du système)"
+    exit 1
+}
+
+while getopts "h:c:i:help" opt; do
+    case $opt in
+        h) HOTE="$OPTARG" ;;
+        c) NB_PINGS="$OPTARG" ;;
+        i) INTERFACE="$OPTARG" ;;
+        *) usage ;;
+    esac
+done
+
+separateur() {
+    echo -e "${CYAN}----------------------------------------------------${RESET}"
+}
+
+titre() {
+    echo -e "\n${JAUNE}=== $1 ===${RESET}"
+}
+
+# ---------- 1. Vérification des outils nécessaires ----------
+verifier_dependances() {
+    for cmd in ping ip curl; do
+        if ! command -v "$cmd" &>/dev/null; then
+            echo -e "${ROUGE}Erreur : la commande '$cmd' n'est pas installée.${RESET}"
+            exit 1
+        fi
+    done
+}
+
+# ---------- 2. Infos sur les interfaces réseau ----------
+infos_interfaces() {
+    titre "Interfaces réseau"
+    if [ -n "$INTERFACE" ]; then
+        ip -brief addr show "$INTERFACE" 2>/dev/null || {
+            echo -e "${ROUGE}Interface '$INTERFACE' introuvable.${RESET}"
+            exit 1
+        }
+    else
+        ip -brief addr show
+    fi
+
+    separateur
+    echo "Route par défaut :"
+    ip route | grep default || echo "Aucune route par défaut trouvée."
+}
+
+# ---------- 3. Test de latence + perte de paquets ----------
+test_latence() {
+    titre "Latence et perte de paquets vers $HOTE"
+
+    local resultat
+    resultat=$(ping -c "$NB_PINGS" -q "$HOTE" 2>/dev/null) || {
+        echo -e "${ROUGE}Impossible de joindre $HOTE (host injoignable ou pas de réseau).${RESET}"
+        return 1
+    }
+
+    local perte
+    perte=$(echo "$resultat" | grep -oP '\d+(?=% packet loss)')
+    local stats_rtt
+    stats_rtt=$(echo "$resultat" | grep 'rtt' | awk -F'=' '{print $2}')
+
+    echo "Perte de paquets : ${perte}%"
+    echo "RTT (min/moy/max/mdev) : ${stats_rtt}"
+
+    if [ "$perte" -eq 0 ]; then
+        echo -e "${VERT}✓ Aucune perte de paquets détectée.${RESET}"
+    elif [ "$perte" -lt 20 ]; then
+        echo -e "${JAUNE}⚠ Perte de paquets modérée.${RESET}"
+    else
+        echo -e "${ROUGE}✗ Perte de paquets importante, réseau instable.${RESET}"
+    fi
+}
+
+# ---------- 4. Test de débit (téléchargement) ----------
+test_debit() {
+    titre "Test de débit (téléchargement)"
+
+    local url="http://speedtest.tele2.net/10MB.zip"
+    local fichier_temp="/tmp/netperf_test.tmp"
+
+    echo "Téléchargement d'un fichier de test (10 Mo)..."
+
+    local debut
+    debut=$(date +%s.%N)
+
+    if curl -s -o "$fichier_temp" --max-time 30 "$url"; then
+        local fin
+        fin=$(date +%s.%N)
+        local duree
+        duree=$(echo "$fin - $debut" | bc)
+        local taille_octets
+        taille_octets=$(stat -c%s "$fichier_temp")
+        local debit_mbps
+        debit_mbps=$(echo "scale=2; ($taille_octets * 8) / ($duree * 1000000)" | bc)
+
+        echo "Taille téléchargée : $(echo "scale=2; $taille_octets/1048576" | bc) Mo"
+        echo "Durée : ${duree}s"
+        echo -e "${VERT}Débit estimé : ${debit_mbps} Mbps${RESET}"
+
+        rm -f "$fichier_temp"
+    else
+        echo -e "${ROUGE}Échec du test de débit (timeout ou pas de connexion).${RESET}"
+    fi
+}
+
+# ---------- 5. Résumé final ----------
+resume() {
+    titre "Résumé du diagnostic"
+    echo "Hôte testé      : $HOTE"
+    echo "Nombre de pings : $NB_PINGS"
+    echo "Date            : $(date '+%Y-%m-%d %H:%M:%S')"
+    separateur
+}
+
+# ---------- Exécution principale ----------
+main() {
+    echo -e "${CYAN}#####################################${RESET}"
+    echo -e "${CYAN}#   NETPERF - Diagnostic Réseau    #${RESET}"
+    echo -e "${CYAN}#####################################${RESET}"
+
+    verifier_dependances
+    infos_interfaces
+    test_latence
+    test_debit
+    resume
+}
+
+main
